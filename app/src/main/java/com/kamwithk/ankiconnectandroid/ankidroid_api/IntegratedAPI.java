@@ -1,6 +1,7 @@
 package com.kamwithk.ankiconnectandroid.ankidroid_api;
 
 import android.app.Activity;
+import android.content.ContentResolver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
@@ -8,15 +9,23 @@ import android.database.Cursor;
 import android.net.Uri;
 import android.os.Handler;
 import android.os.Looper;
+import android.text.Html;
 import android.util.SparseArray;
 import android.widget.Toast;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
 
 import java.io.IOException;
+import java.lang.reflect.Array;
+import java.nio.charset.StandardCharsets;
 import java.util.*;
+import java.security.MessageDigest;
+import java.util.regex.Pattern;
+import java.util.regex.Matcher;
+import java.math.BigInteger;
 
 import static com.ichi2.anki.api.AddContentApi.READ_WRITE_PERMISSION;
+import static com.kamwithk.ankiconnectandroid.request_parsers.Parser.splitFields;
 
 import com.kamwithk.ankiconnectandroid.request_parsers.MediaRequest;
 import com.ichi2.anki.FlashCardsContract;
@@ -31,6 +40,12 @@ public class IntegratedAPI {
     public final NoteAPI noteAPI;
     public final MediaAPI mediaAPI;
     private final AddContentApi api; // TODO: Combine all API classes???
+
+    private final Pattern stylePattern = Pattern.compile("(?s)<style.*?>.*?</style>");
+    private final Pattern scriptPattern = Pattern.compile("(?s)<script.*?>.*?</script>");
+    private final Pattern tagPattern = Pattern.compile("<.*?>");
+    private final Pattern imgPattern = Pattern.compile("<img src=[\"']?([^\"'>]+)[\"']? ?/?>");
+    private final Pattern htmlEntitiesPattern = Pattern.compile("&#?\\w+;");
 
     public IntegratedAPI(Context context) {
         this.context = context;
@@ -67,6 +82,142 @@ public class IntegratedAPI {
         }
     }
 
+    //From Ankidroid
+    private String stripHTMLMedia(String s) {
+        Matcher imgMatcher = imgPattern.matcher(s);
+        return stripHTML(imgMatcher.replaceAll(" $1 "));
+    }
+
+    private String stripHTML(String s) {
+        Matcher htmlMatcher = stylePattern.matcher(s);
+        String strRep = htmlMatcher.replaceAll("");
+        htmlMatcher = scriptPattern.matcher(strRep);
+        strRep = htmlMatcher.replaceAll("");
+        htmlMatcher = tagPattern.matcher(strRep);
+        strRep = htmlMatcher.replaceAll("");
+        return entsToTxt(strRep);
+    }
+
+    private String entsToTxt(String html) {
+        String htmlReplaced = html.replace("&nbsp;", " ");
+        Matcher htmlEntities = htmlEntitiesPattern.matcher(htmlReplaced);
+        StringBuffer sb = new StringBuffer();
+        while (htmlEntities.find()) {
+            htmlEntities.appendReplacement(sb, String.valueOf(Html.fromHtml(htmlEntities.group())));
+        }
+        htmlEntities.appendTail(sb);
+        return sb.toString();
+    }
+
+    private Long fieldChecksum(String data) {
+        String strippedData = stripHTMLMedia(data);
+
+        try {
+            MessageDigest md = MessageDigest.getInstance("SHA-1");
+            byte[] digest = md.digest(md.digest(strippedData.getBytes(StandardCharsets.UTF_8)));
+            BigInteger bigInteger = new BigInteger(1, digest);
+            String result = bigInteger.toString();
+
+            if (result.length() < 40) {
+                String zeroes = "0000000000000000000000000000000000000000";
+                result = zeroes.substring(0, zeroes.length() - result.length()) + result;
+            }
+            return Long.valueOf(result.substring(0, 8), 16);
+        }
+        catch (Exception e) {
+            throw new IllegalStateException("Error making field checksum with SHA1 algorithm and UTF-8 encoding", e);
+        }
+    }
+
+    public Boolean canAddNote(Parser.NoteFront noteToTest) throws Exception {
+        final String[] CAN_ADD_NOTE_PROJECTION = {FlashCardsContract.Note.FLDS};
+        Map<String, Long> modelNameToId = modelAPI.modelNamesAndIds(0);
+        Parser.NoteOptions noteOptions = noteToTest.getOptions();
+        Long modelId = modelNameToId.get(noteToTest.getModelName());
+        String duplicateScope = noteOptions.getDuplicateScope();
+
+        if (modelId == null) {
+            return false;
+        }
+
+        //TODO add check if first field is empty (checksum is 0)
+
+        if (!noteOptions.isAllowDuplicate() && !duplicateScope.equals("deck") && !noteOptions.isCheckAllModels()) {
+            List<NoteInfo> dupeList = api.findDuplicateNotes(modelId, noteToTest.getFieldValue());
+            return (dupeList.get(0) == null);
+        }
+        else {
+            //for now if we get here just pass the card if dupes are allowed
+            if (noteOptions.isAllowDuplicate()) {
+                return true;
+            }
+
+            //if scope is "deck":
+            //query all notes with same deckname, compare csum (check value instead?), mid (in case we need to check all models)
+
+            //if scope is not "deck":
+            //query all notes, compare csum (value?), mid (in case we don't need to check all models)
+
+            //so projection: CSUM, MID
+            //query: if scope is "deck" choose "did: [DECKID]"
+
+            //check all notes:
+            //if all models need to be checked, anything with same csum will fail;
+            //if only the mid needs to be checked, needs same csum and mid
+            long noteCsum = fieldChecksum(noteToTest.getFieldValue());
+            String query = noteToTest.getFieldName() + ":" + noteToTest.getFieldValue();
+            if (noteOptions.getDuplicateScope().equals("deck")) {
+                Long deckId = deckAPI.getDeckID(noteToTest.getDeckName());
+                query = query + " did:" + deckId;
+            }
+            if (!noteOptions.isCheckAllModels()) {
+                query = query + " mid:" + modelId;
+            }
+
+            ContentResolver resolver = context.getContentResolver();
+
+            Cursor cursor = resolver.query(
+                    FlashCardsContract.Note.CONTENT_URI,
+                    CAN_ADD_NOTE_PROJECTION,
+                    query,
+                    null,
+                    null,
+                    null
+            );
+
+            if(cursor == null) {
+                return true; //Assuming if this is true, then we couldn't find a match, so its not a duplicate
+            }
+
+            try (cursor) {
+                while (cursor.moveToNext()) {
+                    int fldsIdx = cursor.getColumnIndexOrThrow(FlashCardsContract.Note.FLDS);
+                    String[] fieldValues = splitFields(cursor.getString(fldsIdx));
+
+                    if (fieldValues[0].equals(noteToTest.getFieldValue())) {
+                        return false;
+                    }
+                }
+            }
+        }
+
+        return true;
+    }
+
+    public ArrayList<Boolean> canAddNotesNew(ArrayList<Parser.NoteFront> notesToTest) throws Exception {
+
+        if (notesToTest.size() <= 0) {
+            return new ArrayList<>();
+        }
+
+        ArrayList<Boolean> noteAllowed = new ArrayList<>();
+
+        for(Parser.NoteFront note: notesToTest) {
+            noteAllowed.add(canAddNote(note));
+        }
+
+        return noteAllowed;
+    }
 
     public ArrayList<Boolean> canAddNotes(ArrayList<Parser.NoteFront> notesToTest) throws Exception {
 

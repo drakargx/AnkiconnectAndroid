@@ -176,7 +176,7 @@ public class AnkiAPIRouting {
 
     private String canAddNotes(JsonObject raw_json) throws Exception {
         ArrayList<Parser.NoteFront> notes_to_test = Parser.getNoteFront(raw_json);
-        return Parser.gson.toJson(integratedAPI.canAddNotes(notes_to_test));
+        return Parser.gson.toJson(integratedAPI.canAddNotesNew(notes_to_test));
     }
 
     /**
