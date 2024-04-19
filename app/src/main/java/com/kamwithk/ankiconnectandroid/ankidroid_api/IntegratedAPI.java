@@ -103,7 +103,7 @@ public class IntegratedAPI {
         Matcher htmlEntities = htmlEntitiesPattern.matcher(htmlReplaced);
         StringBuffer sb = new StringBuffer();
         while (htmlEntities.find()) {
-            htmlEntities.appendReplacement(sb, String.valueOf(Html.fromHtml(htmlEntities.group())));
+            htmlEntities.appendReplacement(sb, Html.fromHtml(htmlEntities.group()).toString());
         }
         htmlEntities.appendTail(sb);
         return sb.toString();
@@ -114,7 +114,7 @@ public class IntegratedAPI {
 
         try {
             MessageDigest md = MessageDigest.getInstance("SHA-1");
-            byte[] digest = md.digest(md.digest(strippedData.getBytes(StandardCharsets.UTF_8)));
+            byte[] digest = md.digest(strippedData.getBytes(StandardCharsets.UTF_8));
             BigInteger bigInteger = new BigInteger(1, digest);
             String result = bigInteger.toString();
 
@@ -164,7 +164,7 @@ public class IntegratedAPI {
             //check all notes:
             //if all models need to be checked, anything with same csum will fail;
             //if only the mid needs to be checked, needs same csum and mid
-            long noteCsum = fieldChecksum(noteToTest.getFieldValue());
+            //long noteCsum = fieldChecksum(noteToTest.getFieldValue());
             String query = noteToTest.getFieldName() + ":" + noteToTest.getFieldValue();
             if (noteOptions.getDuplicateScope().equals("deck")) {
                 Long deckId = deckAPI.getDeckID(noteToTest.getDeckName());
